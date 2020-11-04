@@ -67,6 +67,9 @@ type (
 
 		// resource is applied to all records in this Accumulator.
 		resource *resource.Resource
+
+		// metricsProcessors are applied to all records in this Accumulator
+		metricsProcessors []MetricsProcessor
 	}
 
 	syncInstrument struct {
@@ -123,8 +126,9 @@ type (
 	}
 
 	instrument struct {
-		meter      *Accumulator
-		descriptor metric.Descriptor
+		meter             *Accumulator
+		descriptor        metric.Descriptor
+		metricsProcessors []MetricsProcessor
 	}
 
 	asyncInstrument struct {
@@ -139,6 +143,15 @@ type (
 		labels        *label.Set
 		observed      export.Aggregator
 	}
+
+	// Implementations of MetricsProcessor can be provided as an config option to provide an opportunity
+	// to re-compose metrics labels based on the context when the metrics are recorded.
+	MetricsProcessor interface {
+		// OnMetricRecorded is execute everytime a metric is recorded by
+		// the sync instrument implementation of an Accumulator, it generally
+		// provides ability to correlate the context with the metrics
+		OnMetricRecorded(context.Context, *[]label.KeyValue)
+	}
 )
 
 var (
@@ -152,6 +165,10 @@ var (
 
 func (inst *instrument) Descriptor() api.Descriptor {
 	return inst.descriptor
+}
+
+func (inst *instrument) getMetricsProcessors() []MetricsProcessor {
+	return inst.metricsProcessors
 }
 
 func (a *asyncInstrument) Implementation() interface{} {
@@ -291,6 +308,9 @@ func (s *syncInstrument) Bind(kvs []label.KeyValue) api.BoundSyncImpl {
 }
 
 func (s *syncInstrument) RecordOne(ctx context.Context, number api.Number, kvs []label.KeyValue) {
+	for _, processor := range s.getMetricsProcessors() {
+		processor.OnMetricRecorded(ctx, &kvs)
+	}
 	h := s.acquireHandle(kvs, nil)
 	defer h.Unbind()
 	h.RecordOne(ctx, number)
@@ -312,9 +332,10 @@ func NewAccumulator(processor export.Processor, opts ...Option) *Accumulator {
 	}
 
 	return &Accumulator{
-		processor:        processor,
-		asyncInstruments: internal.NewAsyncInstrumentState(),
-		resource:         c.Resource,
+		processor:         processor,
+		asyncInstruments:  internal.NewAsyncInstrumentState(),
+		resource:          c.Resource,
+		metricsProcessors: c.MetricsProcessors,
 	}
 }
 
@@ -322,8 +343,9 @@ func NewAccumulator(processor export.Processor, opts ...Option) *Accumulator {
 func (m *Accumulator) NewSyncInstrument(descriptor api.Descriptor) (api.SyncImpl, error) {
 	return &syncInstrument{
 		instrument: instrument{
-			descriptor: descriptor,
-			meter:      m,
+			descriptor:        descriptor,
+			meter:             m,
+			metricsProcessors: m.metricsProcessors,
 		},
 	}, nil
 }
